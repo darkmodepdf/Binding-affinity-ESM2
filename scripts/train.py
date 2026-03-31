@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--run-name", type=str, default=None, help="Run name for logging")
     parser.add_argument("--epochs", type=int, default=None, help="Override num epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--num-workers", type=int, default=None, help="Override dataloader workers")
     parser.add_argument(
         "--smoke-test", action="store_true",
         help="Run quick smoke test with tiny subset"
@@ -82,6 +83,8 @@ def main():
         train_config.num_epochs = args.epochs
     if args.batch_size:
         train_config.batch_size = args.batch_size
+    if args.num_workers is not None:
+        data_config.num_workers = args.num_workers
 
     set_seed(train_config.seed)
 

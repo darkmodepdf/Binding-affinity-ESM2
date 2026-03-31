@@ -3,6 +3,7 @@ Central configuration for the Binding Affinity Prediction project.
 All hyperparameters, paths, and constants in one place.
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -108,7 +109,7 @@ class DataConfig:
     antigen_mask_prob: float = 0.15
 
     # Number of dataloader workers
-    num_workers: int = 4
+    num_workers: int = int(os.environ.get("NUM_WORKERS", getattr(os, "cpu_count", lambda: 4)() or 4))
 
 
 @dataclass
