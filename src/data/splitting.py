@@ -12,10 +12,18 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedShuffleSplit
+from tqdm import tqdm
 
 from src.config import DataConfig
 
 logger = logging.getLogger(__name__)
+
+try:
+    from abnumber import Chain
+    HAS_ABNUMBER = True
+except ImportError:
+    HAS_ABNUMBER = False
+    logger.warning("abnumber not installed. Falling back to exact heavy sequence match for LOAFO leakage.")
 
 
 def create_loafo_splits(
@@ -36,10 +44,41 @@ def create_loafo_splits(
     families = sorted(df["antigen_family"].unique())
     splits = []
 
+    # ── Precompute CDR3s for all unique heavy sequences ──
+    unique_heavy = df["heavy_sequence"].unique()
+    heavy_to_feature = {}
+    
+    if HAS_ABNUMBER:
+        logger.info(f"Extracting CDR3 for {len(unique_heavy)} unique heavy sequences to prevent LOAFO leakage...")
+        for seq in tqdm(unique_heavy, desc="Extracting CDR3"):
+            try:
+                heavy_to_feature[seq] = Chain(seq, scheme='imgt').cdr3_seq
+            except Exception:
+                heavy_to_feature[seq] = seq  # fallback to exact sequence if parsing fails
+    else:
+        # Fallback to exact sequence match
+        for seq in unique_heavy:
+            heavy_to_feature[seq] = seq
+
     for held_out_family in families:
         test_mask = df["antigen_family"] == held_out_family
-        train_df = df[~test_mask].reset_index(drop=True)
+        
+        # Test set heavy features (CDR3s or full sequences)
+        test_heavy_seqs = df.loc[test_mask, "heavy_sequence"].unique()
+        test_features = {heavy_to_feature[s] for s in test_heavy_seqs}
+        
+        # Any training row with a heavy feature in 'test_features' is considered a leak
+        # and must be excluded from training.
+        train_candidates = df[~test_mask]
+        train_features = train_candidates["heavy_sequence"].map(heavy_to_feature)
+        leak_mask = train_features.isin(test_features)
+        
+        valid_train_mask = (~test_mask) & (~df["heavy_sequence"].map(heavy_to_feature).isin(test_features))
+        
+        train_df = df[valid_train_mask].reset_index(drop=True)
         test_df = df[test_mask].reset_index(drop=True)
+        
+        leaked_count = len(train_candidates) - len(train_df)
 
         if len(test_df) == 0:
             logger.warning(f"Family {held_out_family} has 0 test samples — skipping")
@@ -47,7 +86,7 @@ def create_loafo_splits(
 
         logger.info(
             f"LOAFO fold {held_out_family}: "
-            f"train={len(train_df)}, test={len(test_df)} "
+            f"train={len(train_df)} (removed {leaked_count} leaked), test={len(test_df)} "
             f"(test antigens: {test_df['antigen_sequence'].nunique()})"
         )
         splits.append((train_df, test_df))

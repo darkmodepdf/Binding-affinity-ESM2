@@ -108,15 +108,25 @@ def main():
         model_config.num_antigen_families = len(family_info)
         logger.info(f"Number of antigen families: {model_config.num_antigen_families}")
 
+    # Load normalization stats for z-scoring and loss weighting
+    norm_stats = None
+    type_weights = None
+    stats_path = preprocessed_dir / "normalization_stats.json"
+    if stats_path.exists():
+        with open(stats_path) as f:
+            norm_stats = json.load(f)
+        type_weights = {k: v.get("loss_weight", 1.0) for k, v in norm_stats.items()}
+        logger.info(f"Loaded normalization stats and type weights: {type_weights}")
+
     # ── Tokenizer ──
     tokenizer = load_esm2_tokenizer(model_config.esm_model_name)
 
     # ── Datasets ──
     train_dataset = AffinityDataset(
-        train_df, tokenizer, data_config, is_training=True
+        train_df, tokenizer, data_config, is_training=True, norm_stats=norm_stats
     )
     val_dataset = AffinityDataset(
-        val_df, tokenizer, data_config, is_training=False
+        val_df, tokenizer, data_config, is_training=False, norm_stats=norm_stats
     )
 
     # ── Balanced sampler ──
@@ -150,6 +160,8 @@ def main():
         train_config=train_config,
         eval_config=eval_config,
         model_config=model_config,
+        type_weights=type_weights,
+        norm_stats=norm_stats,
     )
 
     best_metrics = trainer.train()

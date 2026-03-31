@@ -21,10 +21,28 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import DataConfig, ModelConfig, OUTPUT_DIR
+from src.config import DataConfig, ModelConfig, OUTPUT_DIR, AFFINITY_TYPES
 from src.data.dataset import AffinityDataset
 from src.model.model import AffinityModel
 from src.model.encoder import load_esm2_tokenizer
+
+
+def denormalize_predictions(
+    preds: np.ndarray, types: np.ndarray, norm_stats: dict
+) -> np.ndarray:
+    """Denormalize predictions back to original units."""
+    if not norm_stats:
+        return preds
+    
+    for i, atype in enumerate(AFFINITY_TYPES):
+        mask = types == i
+        if mask.any() and atype in norm_stats:
+            mean = norm_stats[atype].get("mean", 0.0)
+            std = norm_stats[atype].get("std", 1.0)
+            std = std if std > 1e-6 else 1.0
+            preds[mask] = preds[mask] * std + mean
+            
+    return preds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,7 +117,15 @@ def main():
 
     # Tokenizer and dataset
     tokenizer = load_esm2_tokenizer(model_config.esm_model_name)
-    dataset = AffinityDataset(df, tokenizer, data_config, is_training=False)
+    
+    # Load norm stats
+    norm_stats = None
+    stats_path = Path(OUTPUT_DIR) / "preprocessed" / "normalization_stats.json"
+    if stats_path.exists():
+        with open(stats_path) as f:
+            norm_stats = json.load(f)
+
+    dataset = AffinityDataset(df, tokenizer, data_config, is_training=False, norm_stats=norm_stats)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -130,6 +156,9 @@ def main():
             all_preds.append(outputs["predictions"].float().cpu().numpy())
 
     predictions = np.concatenate(all_preds)
+    types = df["affinity_type_idx"].values
+    predictions = denormalize_predictions(predictions, types, norm_stats)
+    
     df["predicted_affinity"] = predictions
 
     # Save

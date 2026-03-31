@@ -70,7 +70,8 @@ class ModelConfig:
 
     # Gradient reversal
     use_gradient_reversal: bool = True
-    grl_lambda: float = 0.1  # weight of adversarial loss
+    grl_lambda_max: float = 0.1  # max weight of adversarial loss
+    grl_gamma: float = 10.0  # schedule steepness for ramping
     num_antigen_families: int = 8  # set dynamically after clustering
 
     # Antigen dropout (anti-bias)
@@ -100,8 +101,8 @@ class DataConfig:
     # Balanced sampling
     sampling_power: float = 0.5  # sqrt dampening: weight = 1/count^power
 
-    # Light chain masking probability
-    light_chain_mask_prob: float = 0.3
+    # Light chain masking probability (anti-bias)
+    light_chain_mask_prob: float = 0.5
 
     # Antigen subsequence masking probability (augmentation)
     antigen_mask_prob: float = 0.15

@@ -25,12 +25,19 @@ class MultiTaskLoss(nn.Module):
         self,
         affinity_types: list = AFFINITY_TYPES,
         grl_weight: float = 0.1,
+        type_weights: Optional[Dict[str, float]] = None,
     ):
         super().__init__()
         self.affinity_types = affinity_types
         self.grl_weight = grl_weight
         self.mse = nn.MSELoss(reduction="none")
         self.ce = nn.CrossEntropyLoss()
+        
+        # map weights by index
+        self.weights = torch.ones(len(affinity_types))
+        if type_weights is not None:
+            for i, atype in enumerate(affinity_types):
+                self.weights[i] = type_weights.get(atype, 1.0)
 
     def forward(
         self,
@@ -57,8 +64,14 @@ class MultiTaskLoss(nn.Module):
 
         # ── Per-type regression losses ──
         per_sample_loss = self.mse(predictions, targets)  # (B,)
-
-        total_regression_loss = per_sample_loss.mean()
+        
+        # apply inverse frequency weighting
+        sample_weights = torch.ones_like(per_sample_loss)
+        device_weights = self.weights.to(predictions.device)
+        for i in range(len(self.affinity_types)):
+            sample_weights[affinity_type_idx == i] = device_weights[i]
+            
+        total_regression_loss = (per_sample_loss * sample_weights).mean()
         result["regression_loss"] = total_regression_loss
 
         # Per-type breakdowns (for logging)

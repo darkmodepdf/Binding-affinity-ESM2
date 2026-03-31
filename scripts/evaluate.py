@@ -105,6 +105,25 @@ def predict(
     )
 
 
+def denormalize_predictions(
+    preds: np.ndarray, targets: np.ndarray, types: np.ndarray, norm_stats: Optional[Dict]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Denormalize predictions and targets back to original units."""
+    if not norm_stats:
+        return preds, targets
+    
+    for i, atype in enumerate(AFFINITY_TYPES):
+        mask = types == i
+        if mask.any() and atype in norm_stats:
+            mean = norm_stats[atype].get("mean", 0.0)
+            std = norm_stats[atype].get("std", 1.0)
+            std = std if std > 1e-6 else 1.0
+            preds[mask] = preds[mask] * std + mean
+            targets[mask] = targets[mask] * std + mean
+            
+    return preds, targets
+
+
 def save_plots(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -231,7 +250,12 @@ def main():
     # Tokenizer
     tokenizer = load_esm2_tokenizer(model_config.esm_model_name)
 
-
+    # Load norm stats
+    norm_stats = None
+    stats_path = preprocessed_dir / "normalization_stats.json"
+    if stats_path.exists():
+        with open(stats_path) as f:
+            norm_stats = json.load(f)
 
     plot_dir = Path(eval_config.plot_dir)
 
@@ -255,6 +279,8 @@ def main():
         )
 
         preds, targets, types = predict(model, test_loader, device)
+        preds, targets = denormalize_predictions(preds, targets, types, norm_stats)
+        
         metrics = compute_all_metrics(
             y_true=targets,
             y_pred=preds,
@@ -312,6 +338,8 @@ def main():
                 )
 
                 preds, targets, types = predict(model, test_loader, device)
+                preds, targets = denormalize_predictions(preds, targets, types, norm_stats)
+                
                 metrics = compute_all_metrics(
                     y_true=targets,
                     y_pred=preds,
@@ -335,6 +363,39 @@ def main():
                     )
 
             all_results["loafo"] = loafo_results
+
+            # ── Print LOAFO Summary Table ──
+            if loafo_results:
+                logger.info("\n" + "=" * 60)
+                logger.info("LOAFO Cross-Validation Summary")
+                logger.info("=" * 60)
+                logger.info(f"{'Fold':<10} | {'Family':<15} | {'N Test':<8} | {'Pearson':<8} | {'Spearman':<8} | {'RMSE':<8}")
+                logger.info("-" * 69)
+                
+                table_data = []
+                for idx, (fold, metrics) in enumerate(loafo_results.items()):
+                    n_test = metrics.get('overall/count', 0)
+                    pearson = metrics.get('overall/pearson_r', float("nan"))
+                    spearman = metrics.get('overall/spearman_rho', float("nan"))
+                    rmse = metrics.get('overall/rmse', float("nan"))
+                    
+                    # Try to get family name from info if available
+                    family_name = f"Fam_?"
+                    if 'loafo_info' in locals() and fold in loafo_info:
+                        families = loafo_info[fold].get("test_families", [])
+                        if families:
+                            family_name = f"Fam_{families[0]}"
+                    
+                    logger.info(f"{fold:<10} | {family_name:<15} | {n_test:<8} | {pearson:<8.4f} | {spearman:<8.4f} | {rmse:<8.4f}")
+                    table_data.append([fold, family_name, n_test, pearson, spearman, rmse])
+                
+                logger.info("=" * 69)
+                
+                # Save table
+                out_csv = LOGS_DIR / "loafo_results_table.csv"
+                df_table = pd.DataFrame(table_data, columns=["Fold", "Family", "N_Test", "Pearson", "Spearman", "RMSE"])
+                df_table.to_csv(out_csv, index=False)
+                logger.info(f"Saved LOAFO table to {out_csv}")
 
 
 

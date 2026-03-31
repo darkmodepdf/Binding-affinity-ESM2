@@ -9,3 +9,4 @@ biopython
 matplotlib
 seaborn
 tqdm
+abnumber

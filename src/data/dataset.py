@@ -34,6 +34,7 @@ class AffinityDataset(Dataset):
         tokenizer: AutoTokenizer,
         config: DataConfig,
         is_training: bool = True,
+        norm_stats: Optional[Dict] = None,
     ):
         """
         Args:
@@ -41,6 +42,7 @@ class AffinityDataset(Dataset):
             tokenizer: ESM-2 tokenizer.
             config: DataConfig instance.
             is_training: If True, apply augmentations (masking).
+            norm_stats: Dictionary of per-type mean/std for target z-scoring.
         """
         self.df = df.reset_index(drop=True)
         self.tokenizer = tokenizer
@@ -57,6 +59,19 @@ class AffinityDataset(Dataset):
         self.target_values = torch.tensor(
             self.df["target_value"].values, dtype=torch.float32
         )
+
+        # Apply z-score normalization
+        if norm_stats is not None:
+            norm_targets = np.zeros_like(self.df["target_value"].values)
+            for atype, stats in norm_stats.items():
+                mask = self.df["affinity_type"] == atype
+                if mask.any():
+                    mean = stats.get("mean", 0.0)
+                    std = stats.get("std", 1.0)
+                    std = std if std > 1e-6 else 1.0  # prevent div by zero
+                    norm_targets[mask] = (self.df.loc[mask, "target_value"] - mean) / std
+            self.target_values = torch.tensor(norm_targets, dtype=torch.float32)
+            logger.info(f"Applied Z-score normalization using stats for {len(norm_stats)} types")
 
         # Antigen family for gradient reversal
         self.antigen_families = torch.tensor(

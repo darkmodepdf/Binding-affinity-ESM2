@@ -132,13 +132,19 @@ def compute_per_type_stats(df: pd.DataFrame) -> dict:
     Used for z-score normalization during training.
     """
     stats = {}
-    for atype in df["affinity_type"].unique():
+    valid_types = [t for t in df["affinity_type"].unique() if len(df[df["affinity_type"] == t]) > 0]
+    num_types = len(valid_types)
+    total_count = len(df)
+
+    for atype in valid_types:
         subset = df[df["affinity_type"] == atype]["target_value"]
+        count = len(subset)
         stats[atype] = {
             "mean": float(subset.mean()),
-            "std": float(subset.std()),
+            "std": float(subset.std()) if count > 1 else 1.0,
             "min": float(subset.min()),
             "max": float(subset.max()),
-            "count": int(len(subset)),
+            "count": int(count),
+            "loss_weight": float(total_count / (num_types * count)) if count > 0 else 1.0
         }
     return stats

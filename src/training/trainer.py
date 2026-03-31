@@ -44,9 +44,10 @@ class Trainer:
         model: AffinityModel,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        train_config: TrainConfig,
         eval_config: EvalConfig,
         model_config: ModelConfig,
+        type_weights: Optional[Dict[str, float]] = None,
+        norm_stats: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -54,6 +55,7 @@ class Trainer:
         self.train_config = train_config
         self.eval_config = eval_config
         self.model_config = model_config
+        self.norm_stats = norm_stats
 
         self.device = torch.device(train_config.device)
         self.model.to(self.device)
@@ -102,7 +104,8 @@ class Trainer:
 
         # ── Loss ──
         self.criterion = MultiTaskLoss(
-            grl_weight=model_config.grl_lambda if model_config.use_gradient_reversal else 0.0,
+            grl_weight=model_config.grl_lambda_max if model_config.use_gradient_reversal else 0.0,
+            type_weights=type_weights,
         )
 
         # ── Early stopping ──
@@ -176,6 +179,14 @@ class Trainer:
 
             # Backward
             loss.backward()
+            
+            # GRL ramping
+            if self.model_config.use_gradient_reversal and self.model.family_classifier is not None:
+                progress = self.global_step / max(1, (self.train_config.num_epochs * len(self.train_loader) // self.train_config.gradient_accumulation_steps))
+                current_lambda = (2.0 / (1.0 + np.exp(-self.model_config.grl_gamma * progress))) - 1.0
+                self.model.family_classifier.set_lambda(current_lambda)
+            else:
+                current_lambda = 0.0
 
             # Gradient accumulation step
             if (step + 1) % self.train_config.gradient_accumulation_steps == 0:
@@ -201,6 +212,7 @@ class Trainer:
                 loss=f"{losses['total_loss'].item():.4f}",
                 avg_loss=f"{avg_loss:.4f}",
                 lr=f"{self.optimizer.param_groups[0]['lr']:.2e}",
+                grl_L=f"{current_lambda:.2f}",
                 step=self.global_step,
             )
 
@@ -252,6 +264,17 @@ class Trainer:
         preds = np.concatenate(all_preds)
         targets = np.concatenate(all_targets)
         type_idx = np.concatenate(all_type_idx)
+
+        # Denormalize for metrics interpretation
+        if self.norm_stats is not None:
+            for i, atype in enumerate(AFFINITY_TYPES):
+                mask = type_idx == i
+                if mask.any() and atype in self.norm_stats:
+                    mean = self.norm_stats[atype].get("mean", 0.0)
+                    std = self.norm_stats[atype].get("std", 1.0)
+                    std = std if std > 1e-6 else 1.0
+                    preds[mask] = preds[mask] * std + mean
+                    targets[mask] = targets[mask] * std + mean
 
         # Compute metrics
         metrics = compute_all_metrics(
