@@ -153,6 +153,9 @@ class TrainConfig:
     # Reproducibility
     seed: int = 42
 
+    # A100 optimizations
+    use_torch_compile: bool = True  # torch.compile for kernel fusion on A100
+
 
 @dataclass
 class EvalConfig:

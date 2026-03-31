@@ -9,6 +9,8 @@ Combines:
 import logging
 from typing import Dict, Optional
 
+import torch.nn.functional as F
+
 import torch
 import torch.nn as nn
 
@@ -106,6 +108,7 @@ class AffinityModel(nn.Module):
     ) -> tuple:
         """
         Encode all sequences through the shared ESM-2 backbone.
+        Batches heavy+light into a single ESM-2 call (3→2 encoder passes).
 
         Returns:
             ab_emb: (B, L_h+L_l, D) concatenated antibody embeddings
@@ -113,16 +116,41 @@ class AffinityModel(nn.Module):
             ag_emb: (B, L_ag, D) antigen embeddings
             ag_mask: (B, L_ag) antigen mask
         """
-        # Encode each sequence
-        heavy_emb = self.encoder(heavy_input_ids, heavy_attention_mask)
-        light_emb = self.encoder(light_input_ids, light_attention_mask)
+        # Save original sequence lengths
+        h_len = heavy_input_ids.size(1)
+        l_len = light_input_ids.size(1)
+        max_ab_len = max(h_len, l_len)
+
+        # Save original masks before any padding
+        orig_heavy_mask = heavy_attention_mask
+        orig_light_mask = light_attention_mask
+
+        # Pad shorter antibody chain to match longer for batched encoding
+        if h_len < max_ab_len:
+            pad_len = max_ab_len - h_len
+            heavy_input_ids = F.pad(heavy_input_ids, (0, pad_len), value=1)  # ESM-2 pad_token_id=1
+            heavy_attention_mask = F.pad(heavy_attention_mask, (0, pad_len), value=0)
+        elif l_len < max_ab_len:
+            pad_len = max_ab_len - l_len
+            light_input_ids = F.pad(light_input_ids, (0, pad_len), value=1)
+            light_attention_mask = F.pad(light_attention_mask, (0, pad_len), value=0)
+
+        # Single batched ESM-2 pass for both antibody chains (2B, max_ab_len)
+        ab_ids = torch.cat([heavy_input_ids, light_input_ids], dim=0)
+        ab_masks = torch.cat([heavy_attention_mask, light_attention_mask], dim=0)
+        ab_emb_all = self.encoder(ab_ids, ab_masks)
+        heavy_emb, light_emb = ab_emb_all.chunk(2, dim=0)
+
+        # Trim back to original lengths
+        heavy_emb = heavy_emb[:, :h_len, :]
+        light_emb = light_emb[:, :l_len, :]
+
+        # Antigen: separate pass (very different sequence length)
         antigen_emb = self.encoder(antigen_input_ids, antigen_attention_mask)
 
-        # Concatenate heavy + light → antibody
+        # Concatenate heavy + light → antibody with original masks
         ab_emb = torch.cat([heavy_emb, light_emb], dim=1)  # (B, L_h+L_l, D)
-        ab_mask = torch.cat(
-            [heavy_attention_mask, light_attention_mask], dim=1
-        )  # (B, L_h+L_l)
+        ab_mask = torch.cat([orig_heavy_mask, orig_light_mask], dim=1)  # (B, L_h+L_l)
 
         # Apply dropout
         ab_emb = self.antibody_dropout(ab_emb)

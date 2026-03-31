@@ -3,7 +3,8 @@ Training loop with tqdm progress tracking and JSON metric logging.
 
 Handles:
 - Multi-task training with balanced sampling
-- bf16 mixed precision on H100
+- bf16 mixed precision on A100
+- Async CUDA prefetching for overlapped data transfer
 - Gradient accumulation
 - Early stopping
 - Checkpointing
@@ -32,6 +33,50 @@ from src.training.losses import MultiTaskLoss
 from src.training.metrics import compute_all_metrics
 
 logger = logging.getLogger(__name__)
+
+
+class CUDAPrefetcher:
+    """
+    Prefetches batches to GPU using a separate CUDA stream.
+
+    Overlaps CPU→GPU data transfer with GPU compute, eliminating
+    the blocking .to(device) call from the training loop.
+    On A100 with PCIe Gen4, this hides ~2-5ms of transfer latency per batch.
+    """
+
+    def __init__(self, loader: DataLoader, device: torch.device):
+        self.loader = loader
+        self.device = device
+        self.stream = torch.cuda.Stream()
+
+    def __iter__(self):
+        self._loader_iter = iter(self.loader)
+        self._preload()
+        return self
+
+    def _preload(self):
+        try:
+            self._next_batch = next(self._loader_iter)
+        except StopIteration:
+            self._next_batch = None
+            return
+
+        with torch.cuda.stream(self.stream):
+            self._next_batch = {
+                k: v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v
+                for k, v in self._next_batch.items()
+            }
+
+    def __next__(self):
+        torch.cuda.current_stream().wait_stream(self.stream)
+        batch = self._next_batch
+        if batch is None:
+            raise StopIteration
+        self._preload()
+        return batch
+
+    def __len__(self):
+        return len(self.loader)
 
 
 class Trainer:
@@ -137,14 +182,18 @@ class Trainer:
             json.dump(make_serializable(self.history), f, indent=2)
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Run a single training epoch."""
+        """Run a single training epoch with CUDA-prefetched data."""
         self.model.train()
         epoch_losses = []
         all_loss_components = {}
 
+        # Async prefetcher: overlaps CPU→GPU transfer with GPU compute
+        prefetcher = CUDAPrefetcher(self.train_loader, self.device)
+
         progress = tqdm(
-            self.train_loader,
+            prefetcher,
             desc=f"Epoch {epoch+1}/{self.train_config.num_epochs}",
+            total=len(self.train_loader),
             leave=True,
             bar_format="{l_bar}{bar:30}{r_bar}",
         )
@@ -152,8 +201,7 @@ class Trainer:
         self.optimizer.zero_grad()
 
         for step, batch in enumerate(progress):
-            # Move to device
-            batch = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
+            # batch is already on GPU via prefetcher — no .to() needed
 
             # Forward
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -182,10 +230,15 @@ class Trainer:
             loss.backward()
             
             # GRL ramping
-            if self.model_config.use_gradient_reversal and self.model.family_classifier is not None:
-                training_progress = self.global_step / max(1, (self.train_config.num_epochs * len(self.train_loader) // self.train_config.gradient_accumulation_steps))
-                current_lambda = self.model_config.grl_lambda_max * ((2.0 / (1.0 + np.exp(-self.model_config.grl_gamma * training_progress))) - 1.0)
-                self.model.family_classifier.set_lambda(current_lambda)
+            if self.model_config.use_gradient_reversal:
+                # Access family_classifier through _orig_mod if torch.compiled
+                _model = getattr(self.model, '_orig_mod', self.model)
+                if _model.family_classifier is not None:
+                    training_progress = self.global_step / max(1, (self.train_config.num_epochs * len(self.train_loader) // self.train_config.gradient_accumulation_steps))
+                    current_lambda = self.model_config.grl_lambda_max * ((2.0 / (1.0 + np.exp(-self.model_config.grl_gamma * training_progress))) - 1.0)
+                    _model.family_classifier.set_lambda(current_lambda)
+                else:
+                    current_lambda = 0.0
             else:
                 current_lambda = 0.0
 
@@ -225,7 +278,7 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, loader: DataLoader, prefix: str = "val") -> Dict[str, float]:
-        """Run evaluation and compute all metrics."""
+        """Run evaluation with CUDA-prefetched data and compute all metrics."""
         self.model.eval()
 
         all_preds = []
@@ -233,8 +286,11 @@ class Trainer:
         all_type_idx = []
         all_losses = []
 
-        for batch in tqdm(loader, desc=f"  Evaluating ({prefix})", leave=False, bar_format="{l_bar}{bar:30}{r_bar}"):
-            batch = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
+        # Async prefetcher for eval too
+        prefetcher = CUDAPrefetcher(loader, self.device)
+
+        for batch in tqdm(prefetcher, desc=f"  Evaluating ({prefix})", total=len(loader), leave=False, bar_format="{l_bar}{bar:30}{r_bar}"):
+            # batch already on GPU via prefetcher
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 outputs = self.model(
@@ -305,9 +361,12 @@ class Trainer:
         ckpt_dir = Path(self.train_config.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+        # Handle torch.compiled model — save original module state
+        _model = getattr(self.model, '_orig_mod', self.model)
+
         state = {
             "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": _model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "metrics": metrics,
@@ -338,6 +397,7 @@ class Trainer:
         logger.info(f"  Batch size: {self.train_config.batch_size}")
         logger.info(f"  Effective batch size: {self.train_config.effective_batch_size}")
         logger.info(f"  Device: {self.device}")
+        logger.info(f"  CUDA prefetching: enabled")
         logger.info(f"  Training history → {self.history_path}")
 
         best_metrics = {}

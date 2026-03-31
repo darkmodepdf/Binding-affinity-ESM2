@@ -2,6 +2,12 @@
 Training entry point.
 
 Loads preprocessed data, builds model, and trains with tqdm progress tracking.
+Optimized for Linux + A100 GPU with:
+- TF32 tensor core math
+- cuDNN auto-tuning
+- torch.compile kernel fusion
+- Persistent DataLoader workers (fork-based)
+- Async CUDA prefetching
 """
 
 import argparse
@@ -23,6 +29,7 @@ from src.config import (
     ModelConfig,
     TrainConfig,
     OUTPUT_DIR,
+    LOGS_DIR,
 )
 from src.data.dataset import AffinityDataset, create_balanced_sampler
 from src.model.model import AffinityModel
@@ -49,8 +56,36 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+
+
+def setup_a100_optimizations():
+    """
+    Enable A100-specific hardware optimizations.
+
+    - TF32: Uses 19-bit mantissa tensor cores for ~3x matmul throughput
+      with negligible accuracy loss vs FP32.
+    - cuDNN benchmark: Auto-tunes convolution algorithms for fixed input sizes.
+    - cuDNN TF32: Enables TF32 for cuDNN operations.
+    """
+    if not torch.cuda.is_available():
+        logger.warning("CUDA not available — skipping A100 optimizations")
+        return
+
+    device_name = torch.cuda.get_device_name(0)
+    logger.info(f"GPU: {device_name}")
+
+    # TF32 for matmul (A100 tensor cores, ~3x throughput)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    # cuDNN auto-tuning (finds fastest algorithms for fixed-size inputs)
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+
+    # Set float32 matmul precision for torch.compile
+    torch.set_float32_matmul_precision('high')
+
+    logger.info("A100 optimizations enabled: TF32, cuDNN benchmark, high matmul precision")
 
 
 def main():
@@ -65,6 +100,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=None, help="Override num epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--num-workers", type=int, default=None, help="Override dataloader workers")
+    parser.add_argument(
+        "--no-compile", action="store_true",
+        help="Disable torch.compile (for debugging)"
+    )
     parser.add_argument(
         "--smoke-test", action="store_true",
         help="Run quick smoke test with tiny subset"
@@ -85,8 +124,13 @@ def main():
         train_config.batch_size = args.batch_size
     if args.num_workers is not None:
         data_config.num_workers = args.num_workers
+    if args.no_compile:
+        train_config.use_torch_compile = False
 
     set_seed(train_config.seed)
+
+    # ── A100 hardware optimizations ──
+    setup_a100_optimizations()
 
     # ── Load preprocessed data ──
     preprocessed_dir = Path(args.preprocessed_dir)
@@ -100,6 +144,7 @@ def main():
         train_df = train_df.head(500)
         val_df = val_df.head(100)
         train_config.num_epochs = 2
+        train_config.use_torch_compile = False  # compile overhead not worth it for smoke test
 
     logger.info(f"Train: {len(train_df)}, Val: {len(val_df)}")
 
@@ -135,25 +180,45 @@ def main():
     # ── Balanced sampler ──
     sampler = create_balanced_sampler(train_df, data_config)
 
-    # ── DataLoaders ──
+    # ── DataLoaders (optimized for Linux fork-based multiprocessing) ──
+    num_workers = data_config.num_workers
+    use_persistent = num_workers > 0
+
+    logger.info(
+        f"DataLoader config: num_workers={num_workers}, "
+        f"persistent_workers={use_persistent}, "
+        f"pin_memory=True, prefetch_factor={4 if use_persistent else 'N/A'}"
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_config.batch_size,
         sampler=sampler,
-        num_workers=data_config.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=use_persistent,      # Keep workers alive across epochs (no re-fork)
+        prefetch_factor=4 if use_persistent else None,  # Pre-fetch 4 batches per worker
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=train_config.batch_size * 2,  # larger batch for eval
         shuffle=False,
-        num_workers=data_config.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=use_persistent,
+        prefetch_factor=4 if use_persistent else None,
     )
 
     # ── Model ──
     model = AffinityModel(model_config)
+
+    # ── torch.compile for kernel fusion (A100 Inductor backend) ──
+    if train_config.use_torch_compile:
+        logger.info("Compiling model with torch.compile (mode='default')...")
+        logger.info("  First few iterations will be slower due to compilation.")
+        model = torch.compile(model, mode="default")
+        logger.info("Model compiled successfully.")
 
     # ── Train ──
     trainer = Trainer(

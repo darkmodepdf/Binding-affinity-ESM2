@@ -130,13 +130,14 @@ class AffinityDataset(Dataset):
         light_seq = self.light_seqs[idx]
         antigen_seq = self.antigen_seqs[idx]
 
-        # Fetch pre-tokenized tensors (O(1)) and clone to avoid mutating cache
-        heavy_enc = {k: v.clone() for k, v in self.heavy_cache[heavy_seq].items()}
-        light_enc = {k: v.clone() for k, v in self.light_cache[light_seq].items()}
-        antigen_enc = {k: v.clone() for k, v in self.antigen_cache[antigen_seq].items()}
-
-        # ── Ultra-fast Tensor Augmentations ──
         if self.is_training:
+            # Heavy is never augmented — no clone needed
+            heavy_enc = self.heavy_cache[heavy_seq]
+            # Light and antigen are mutated by augmentation — must clone
+            light_enc = {k: v.clone() for k, v in self.light_cache[light_seq].items()}
+            antigen_enc = {k: v.clone() for k, v in self.antigen_cache[antigen_seq].items()}
+
+            # ── Ultra-fast Tensor Augmentations ──
             # 1. Light chain masking
             if np.random.random() < self.config.light_chain_mask_prob:
                 valid_mask = (light_enc["attention_mask"] == 1)
@@ -158,6 +159,11 @@ class AffinityDataset(Dataset):
                 rand_mask = torch.rand(antigen_enc["input_ids"].shape) < self.config.antigen_mask_prob
                 final_mask = valid_mask & rand_mask
                 antigen_enc["input_ids"][final_mask] = self.mask_token_id
+        else:
+            # Eval: no augmentation, no mutation — zero-copy from cache
+            heavy_enc = self.heavy_cache[heavy_seq]
+            light_enc = self.light_cache[light_seq]
+            antigen_enc = self.antigen_cache[antigen_seq]
 
         return {
             "heavy_input_ids": heavy_enc["input_ids"],
