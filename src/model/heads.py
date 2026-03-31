@@ -88,6 +88,6 @@ class MultiTaskHeads(nn.Module):
             if mask.any():
                 sub_features = features[mask]
                 sub_preds = self.heads[key](sub_features).squeeze(-1)
-                predictions[mask] = sub_preds
+                predictions[mask] = sub_preds.to(predictions.dtype)
 
         return predictions
