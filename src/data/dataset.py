@@ -89,9 +89,9 @@ class AffinityDataset(Dataset):
         unique_antigen = df["antigen_sequence"].unique().tolist()
         
         from tqdm import tqdm
-        self.heavy_cache = {seq: self._tokenize(seq, config.max_heavy_len) for seq in unique_heavy}
-        self.light_cache = {seq: self._tokenize(seq, config.max_light_len) for seq in unique_light}
-        self.antigen_cache = {seq: self._tokenize(seq, config.max_antigen_len) for seq in unique_antigen}
+        self.heavy_cache = self._batch_tokenize(unique_heavy, config.max_heavy_len)
+        self.light_cache = self._batch_tokenize(unique_light, config.max_light_len)
+        self.antigen_cache = self._batch_tokenize(unique_antigen, config.max_antigen_len)
 
         logger.info(
             f"Created {'train' if is_training else 'eval'} dataset with "
@@ -101,24 +101,29 @@ class AffinityDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def _tokenize(
-        self, sequence: str, max_len: int
-    ) -> Dict[str, torch.Tensor]:
-        """Tokenize a single sequence with padding/truncation."""
-        # Insert spaces between amino acids for ESM tokenizer
-        spaced_seq = " ".join(list(sequence.replace(self.mask_token, "<mask>")))
+    def _batch_tokenize(
+        self, sequences: List[str], max_len: int
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        """Batch tokenize sequences in chunks using ultra-fast Rust backend."""
+        cache = {}
+        chunk_size = 10000
+        for i in range(0, len(sequences), chunk_size):
+            chunk = sequences[i:i + chunk_size]
+            spaced_seqs = [" ".join(list(seq.replace(self.mask_token, "<mask>"))) for seq in chunk]
 
-        encoding = self.tokenizer(
-            spaced_seq,
-            max_length=max_len + 2,  # +2 for BOS/EOS
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-        }
+            encoding = self.tokenizer(
+                spaced_seqs,
+                max_length=max_len + 2,  # +2 for BOS/EOS
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            for j, seq in enumerate(chunk):
+                cache[seq] = {
+                    "input_ids": encoding["input_ids"][j].clone(),
+                    "attention_mask": encoding["attention_mask"][j].clone(),
+                }
+        return cache
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         heavy_seq = self.heavy_seqs[idx]
