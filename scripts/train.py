@@ -165,14 +165,15 @@ def main():
     )
 
     best_metrics = trainer.train()
-
-    logger.info("Training complete! Best validation metrics:")
+    logger.info("\n" + "=" * 60)
+    logger.info("Training complete! Best validation sequence (overall):")
+    logger.info("=" * 60)
     for k, v in sorted(best_metrics.items()):
-        if isinstance(v, float):
-            logger.info(f"  {k}: {v:.4f}")
-        else:
-            logger.info(f"  {k}: {v}")
-
-
+        # Filter to only show core overall metrics, ignore per-head splits in CLI
+        if k.startswith("overall/") and isinstance(v, float):
+            metric_name = k.replace("overall/", "").replace("_", " ").title()
+            logger.info(f"  {metric_name:<20}: {v:.4f}")
+    logger.info("=" * 60)
+    logger.info(f"Detailed per-head metrics saved to {LOGS_DIR}/training_history.json")
 if __name__ == "__main__":
     main()
