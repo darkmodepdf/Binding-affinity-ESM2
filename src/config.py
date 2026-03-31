@@ -109,7 +109,7 @@ class DataConfig:
     antigen_mask_prob: float = 0.15
 
     # Number of dataloader workers
-    num_workers: int = int(os.environ.get("NUM_WORKERS", getattr(os, "cpu_count", lambda: 4)() or 4))
+    num_workers: int = int(os.environ.get("NUM_WORKERS", min(8, getattr(os, "cpu_count", lambda: 4)() or 4)))
 
 
 @dataclass

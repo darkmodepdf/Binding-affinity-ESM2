@@ -80,6 +80,18 @@ class AffinityDataset(Dataset):
 
         # Mask token for augmentation
         self.mask_token = tokenizer.mask_token or "<mask>"
+        self.mask_token_id = getattr(tokenizer, "mask_token_id", 32)
+        
+        # ── Pre-tokenize Unique Sequences for Extreme Speedup ──
+        logger.info("Pre-tokenizing unique sequences to bypass Python DataLoader GIL lockups...")
+        unique_heavy = df["heavy_sequence"].unique().tolist()
+        unique_light = df["light_sequence"].unique().tolist()
+        unique_antigen = df["antigen_sequence"].unique().tolist()
+        
+        from tqdm import tqdm
+        self.heavy_cache = {seq: self._tokenize(seq, config.max_heavy_len) for seq in unique_heavy}
+        self.light_cache = {seq: self._tokenize(seq, config.max_light_len) for seq in unique_light}
+        self.antigen_cache = {seq: self._tokenize(seq, config.max_antigen_len) for seq in unique_antigen}
 
         logger.info(
             f"Created {'train' if is_training else 'eval'} dataset with "
@@ -88,16 +100,6 @@ class AffinityDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.df)
-
-    def _mask_sequence(self, seq: str, mask_prob: float) -> str:
-        """Randomly mask amino acids with <mask> token."""
-        if mask_prob <= 0:
-            return seq
-        residues = list(seq)
-        for i in range(len(residues)):
-            if np.random.random() < mask_prob:
-                residues[i] = self.mask_token
-        return "".join(residues)
 
     def _tokenize(
         self, sequence: str, max_len: int
@@ -123,21 +125,34 @@ class AffinityDataset(Dataset):
         light_seq = self.light_seqs[idx]
         antigen_seq = self.antigen_seqs[idx]
 
-        # ── Augmentations (training only) ──
+        # Fetch pre-tokenized tensors (O(1)) and clone to avoid mutating cache
+        heavy_enc = {k: v.clone() for k, v in self.heavy_cache[heavy_seq].items()}
+        light_enc = {k: v.clone() for k, v in self.light_cache[light_seq].items()}
+        antigen_enc = {k: v.clone() for k, v in self.antigen_cache[antigen_seq].items()}
+
+        # ── Ultra-fast Tensor Augmentations ──
         if self.is_training:
-            # Light chain masking: replace entire light chain with mask tokens
+            # 1. Light chain masking
             if np.random.random() < self.config.light_chain_mask_prob:
-                light_seq = self.mask_token * min(len(light_seq), 10)
+                valid_mask = (light_enc["attention_mask"] == 1)
+                valid_mask[0] = False # Don't mask BOS
+                nz = valid_mask.nonzero()
+                if len(nz) > 0:
+                    valid_mask[nz[-1].item()] = False # Don't mask EOS
+                light_enc["input_ids"][valid_mask] = self.mask_token_id
 
-            # Antigen subsequence masking
-            antigen_seq = self._mask_sequence(
-                antigen_seq, self.config.antigen_mask_prob
-            )
-
-        # ── Tokenize ──
-        heavy_enc = self._tokenize(heavy_seq, self.config.max_heavy_len)
-        light_enc = self._tokenize(light_seq, self.config.max_light_len)
-        antigen_enc = self._tokenize(antigen_seq, self.config.max_antigen_len)
+            # 2. Antigen subsequence masking
+            if self.config.antigen_mask_prob > 0:
+                valid_mask = (antigen_enc["attention_mask"] == 1)
+                valid_mask[0] = False
+                nz = valid_mask.nonzero()
+                if len(nz) > 0:
+                    valid_mask[nz[-1].item()] = False
+                
+                # Apply random mask probability
+                rand_mask = torch.rand(antigen_enc["input_ids"].shape) < self.config.antigen_mask_prob
+                final_mask = valid_mask & rand_mask
+                antigen_enc["input_ids"][final_mask] = self.mask_token_id
 
         return {
             "heavy_input_ids": heavy_enc["input_ids"],
