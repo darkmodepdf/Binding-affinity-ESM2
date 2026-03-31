@@ -183,8 +183,8 @@ class Trainer:
             
             # GRL ramping
             if self.model_config.use_gradient_reversal and self.model.family_classifier is not None:
-                progress = self.global_step / max(1, (self.train_config.num_epochs * len(self.train_loader) // self.train_config.gradient_accumulation_steps))
-                current_lambda = self.model_config.grl_lambda_max * ((2.0 / (1.0 + np.exp(-self.model_config.grl_gamma * progress))) - 1.0)
+                training_progress = self.global_step / max(1, (self.train_config.num_epochs * len(self.train_loader) // self.train_config.gradient_accumulation_steps))
+                current_lambda = self.model_config.grl_lambda_max * ((2.0 / (1.0 + np.exp(-self.model_config.grl_gamma * training_progress))) - 1.0)
                 self.model.family_classifier.set_lambda(current_lambda)
             else:
                 current_lambda = 0.0
