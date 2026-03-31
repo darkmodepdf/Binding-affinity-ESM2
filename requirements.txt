@@ -1,0 +1,11 @@
+torch>=2.1
+transformers>=4.35
+peft>=0.7
+pandas
+numpy
+scipy
+scikit-learn
+biopython
+matplotlib
+seaborn
+tqdm

@@ -1,0 +1,350 @@
+# Antibody-Antigen Binding Affinity Prediction Model
+
+## Problem Statement
+
+Build a model that predicts the binding affinity between an antibody (heavy chain + light chain) and an antigen, given their amino acid sequences. The model must generalize across antigen families despite severe biases in the training data.
+
+## Dataset Summary
+
+| Property | Value |
+|---|---|
+| **Primary dataset** | `asd_regression_ready_hla.csv` (164,310 rows, 11 columns) |
+| **Full dataset** | `asd_full.csv` (~2.7 GB, mostly fuzzy/boolean labels — not directly usable for regression) |
+| **Input features** | `heavy_sequence`, `light_sequence`, `antigen_sequence` |
+| **Target** | `processed_measurement` (numeric affinity value) |
+| **Unique antigens** | 52 |
+| **Unique heavy chains** | 93,879 |
+| **Unique light chains** | 3,082 |
+| **Source datasets** | 8 (abbd, flab_koenig2017, flab_warszawski2019, abdesign, flab_shanehsazzadeh2023, skempiv2, dlgo, ab-bind) |
+
+### Key Sequence Properties
+
+| Sequence | Length Range | Mean Length |
+|---|---|---|
+| Heavy chain | 113–227 aa | 121.4 aa |
+| Light chain | 104–221 aa | 200.5 aa |
+| Antigen | 14–1,283 aa | 449.2 aa |
+
+---
+
+## Critical Bias Analysis
+
+> [!CAUTION]
+> **The dataset has extreme antigen-family bias.** A single antigen (Influenza Hemagglutinin, 519aa) dominates **79.5%** of all data (130,629/164,310 rows). The top 3 antigens cover ~93% of the data.
+
+### Bias Breakdown
+
+| Antigen / Family | Rows | % of Data | Source Dataset |
+|---|---|---|---|
+| Influenza Hemagglutinin (519aa) | 130,629 | 79.5% | abbd |
+| Unknown peptide (14aa) | 17,585 | 10.7% | abbd |
+| VEGF (395aa) | 4,275 | 2.6% | flab_koenig2017 |
+| Influenza HA variant (518aa) | 3,729 | 2.3% | abbd |
+| VEGF-related (102aa) | 2,223 | 1.4% | abbd |
+| Hen Egg Lysozyme (129aa) | 2,048 | 1.2% | flab_warszawski2019 |
+| Lysozyme variant (129aa) | 1,499 | 0.9% | abbd |
+| HER2 (1057aa) | 446 | 0.3% | flab_shanehsazzadeh2023 |
+| COVID variants (10 × 1283aa) | 360 | 0.2% | dlgo |
+| ~32 other antigens | ~1,516 | 0.9% | abdesign, skempiv2, ab-bind |
+
+### Additional Biases
+
+1. **Light chain collapse**: The `abbd` dataset (155K rows) has only **8 unique light chains**, meaning the model could trivially overfit to light chain identity rather than learning general sequence-level interactions.
+2. **Mixed affinity scales**: 6 different measurement types with incompatible scales:
+   - `-log KD` (152,401 rows): range 5.6–12.4, mean 7.76
+   - `kd` (6,769 rows): range 3.7e-5–1461.56
+   - `log_enrichment` (3,452 rows): range -4.1–10.2
+   - `ddg` (670 rows): range -2.9–8.0
+   - `elisa_mut_to_wt_ratio` (658 rows): range 0.01–1.37
+   - `ic_50` (360 rows): range 0.001–5.7
+3. **Antigen concentration**: 10 antigens account for 99.1% of data; the remaining 42 antigens have <100 samples each.
+
+---
+
+## Proposed Architecture
+
+### High-Level Design
+
+```mermaid
+graph TB
+    subgraph Input
+        H[Heavy Chain Seq]
+        L[Light Chain Seq]
+        A[Antigen Seq]
+    end
+
+    subgraph "Sequence Encoder (Shared ESM-2 650M)"
+        E1[ESM-2 Encoder]
+    end
+
+    H --> E1
+    L --> E1
+    A --> E1
+
+    E1 --> H_EMB[Heavy Embeddings<br/>B × L_h × 1280]
+    E1 --> L_EMB[Light Embeddings<br/>B × L_l × 1280]
+    E1 --> A_EMB[Antigen Embeddings<br/>B × L_a × 1280]
+
+    H_EMB --> CONCAT[Concatenate H+L<br/>→ Antibody Embeddings]
+    L_EMB --> CONCAT
+
+    CONCAT --> CROSS[Cross-Attention<br/>Antibody ↔ Antigen]
+    A_EMB --> CROSS
+
+    CROSS --> POOL[Attentive Pooling]
+
+    POOL --> HEAD[Multi-Task Affinity Heads]
+
+    HEAD --> OUT1["-log KD" Head]
+    HEAD --> OUT2["KD Head"]
+    HEAD --> OUT3["ΔΔG Head"]
+    HEAD --> OUT4["Enrichment Head"]
+    HEAD --> OUT5["ELISA Head"]
+    HEAD --> OUT6["IC50 Head"]
+```
+
+### Component Details
+
+#### 1. Protein Language Model Backbone — ESM-2 (650M)
+
+- **Why ESM-2**: Pre-trained on 250M protein sequences; captures evolutionary and structural information from sequence alone. ESM-2 650M balances performance vs. compute.
+- **Usage**: Shared encoder for all three input sequences (heavy, light, antigen). Fine-tuned with LoRA (rank 16) to keep memory manageable.
+- **Alternative considered**: ESM-3 or AbLang (antibody-specific). AbLang could be used for antibody encoding with ESM-2 for antigen, but the dual-encoder adds complexity; starting with a single shared encoder is simpler and has been shown to work well.
+
+> [!IMPORTANT]
+> **Decision point**: Should we use ESM-2 (general protein) for all sequences, or AbLang/IgBERT for antibody chains + ESM-2 for antigen? The former is simpler; the latter may give better antibody representations. I recommend starting with ESM-2 only, and trying the dual-encoder as an ablation.
+
+#### 2. Cross-Attention Interaction Module
+
+- Antibody tokens (concatenated heavy + light) attend to antigen tokens bidirectionally via 4 layers of cross-attention.
+- This models the physical interaction interface rather than just comparing global representations.
+- Each layer: `MultiHeadCrossAttention(d=1280, heads=16)` → LayerNorm → FFN → residual.
+
+#### 3. Attentive Pooling
+
+- Learned query vector attends over all cross-attention output tokens to produce a fixed-size interaction vector (dim=512).
+- Preferable to mean pooling because binding sites are localized.
+
+#### 4. Multi-Task Affinity Heads
+
+Since the 6 affinity scales are fundamentally different measurements, we use **task-specific prediction heads** sharing the same backbone:
+
+| Head | Scale | Loss | Rows |
+|---|---|---|---|
+| `-log KD` | 5.6–12.4 | MSE | 152,401 |
+| `kd` | log-transformed → MSE | MSE on log(kd) | 6,769 |
+| `log_enrichment` | -4.1–10.2 | MSE | 3,452 |
+| `ddg` | -2.9–8.0 | MSE | 670 |
+| `elisa_ratio` | 0–1.37 | MSE | 658 |
+| `ic_50` | log-transformed | MSE on log(ic50) | 360 |
+
+Each head is a 2-layer MLP: `512 → 256 → 1`. Only the relevant head's loss is computed per sample.
+
+---
+
+## Anti-Bias Training Strategy
+
+This is the most critical part of the plan given the dataset characteristics.
+
+### Strategy 1: Antigen-Family-Aware Data Splitting
+
+> [!WARNING]
+> **Standard random splitting would leak antigen information.** If the same antigen appears in train and test, the model merely memorizes antigen-specific patterns.
+
+**Approach**: Split by antigen family, not by row.
+
+Group the 52 antigens into ~8 families based on sequence similarity (use CD-HIT or MMseqs2 clustering at 40% sequence identity):
+- **Influenza HA family** (2 sequences, ~134K rows)
+- **COVID Spike family** (10 sequences, ~360 rows)
+- **Lysozyme family** (2 sequences, ~3.5K rows)
+- **VEGF family** (1-2 sequences, ~6.5K rows)
+- **HER2** (1 sequence, 446 rows)
+- **Small antigens** (~35 sequences, ~2K rows)
+
+**Evaluation protocol**:
+1. **Primary**: Leave-One-Antigen-Family-Out (LOAFO) cross-validation — train on N-1 families, test on the held-out family. This is the gold-standard for measuring generalization.
+2. **Secondary**: Stratified random split within families (80/10/10) — for measuring in-distribution performance.
+
+### Strategy 2: Balanced Sampling During Training
+
+To prevent the model from spending 80% of gradient updates on influenza HA:
+
+```
+Sample weight per row = 1 / sqrt(antigen_family_count)
+```
+
+This gives:
+| Family | Raw count | Effective weight | Effective proportion |
+|---|---|---|---|
+| Influenza HA | 134,358 | 1/366 ≈ 0.0027 | ~15% |
+| COVID Spike | 360 | 1/19 ≈ 0.053 | ~8% |
+| Lysozyme | 3,547 | 1/60 ≈ 0.017 | ~25% |
+| VEGF | 6,498 | 1/81 ≈ 0.012 | ~32% |
+| Others | ~19K | varies | ~20% |
+
+The `sqrt` dampening (vs. full inverse) prevents over-weighting extremely rare families where data is noisy.
+
+### Strategy 3: Antigen Augmentation
+
+To improve generalization to unseen antigens:
+
+1. **Subsequence masking**: Randomly mask 10-15% of antigen tokens during training (forces the model to learn robust features, not memorize specific antigen patterns).
+2. **Homolog substitution**: For antigens with known homologs (e.g., different flu strains), randomly swap antigen sequences within the family during training.
+
+### Strategy 4: Regularization Against Antigen Memorization
+
+1. **Gradient reversal on antigen identity**: Add an auxiliary antigen-family classifier with gradient reversal (Domain-Adversarial Neural Networks idea). This penalizes the shared representation for being predictive of antigen identity, encouraging family-invariant features.
+2. **Dropout on antigen embeddings**: Higher dropout (0.3) on antigen pathway vs. antibody pathway (0.1) to reduce over-reliance on specific antigen representations.
+
+---
+
+## Training Pipeline
+
+### Phase 1: Pre-processing
+
+```
+1. Load asd_regression_ready_hla.csv
+2. Drop 11 non-numeric processed_measurement rows (">8.8")  
+3. log-transform kd and ic_50 values → unified log scale
+4. Cluster antigens into families (MMseqs2, 40% identity)
+5. Assign antigen_family_id to each row
+6. Create LOAFO splits + stratified random split
+```
+
+### Phase 2: Training
+
+| Parameter | Value |
+|---|---|
+| **Backbone** | ESM-2 650M (facebook/esm2_t33_650M_UR50D) |
+| **Fine-tuning** | LoRA (rank=16, alpha=32) on attention layers |
+| **Cross-attention layers** | 4 |
+| **Pooling dim** | 512 |
+| **Batch size** | 32 (gradient accumulation = 2 → effective 64) |
+| **Optimizer** | AdamW, lr=1e-4 (backbone), lr=5e-4 (heads) |
+| **Scheduler** | Cosine annealing with 5% warmup |
+| **Epochs** | 30 (early stopping patience=5 on val loss) |
+| **Max sequence length** | Heavy: 150, Light: 230, Antigen: 600 (covers 95%+ of data) |
+| **Mixed precision** | bf16 (H100 native) |
+| **GPU** | NVIDIA H100 (80GB) |
+
+### Phase 3: Evaluation
+
+**Regression Metrics** (per affinity type and overall):
+- Pearson correlation coefficient (primary metric)
+- Spearman rank correlation
+- RMSE (Root Mean Squared Error)
+- MAE (Mean Absolute Error)
+- R² (Coefficient of Determination)
+- Concordance Index (CI) — measures pairwise ranking accuracy
+- Mean Absolute Percentage Error (MAPE) — where applicable
+
+**Ranking & Classification-Derived Metrics**:
+- NDCG@k (k=10, 50) — Normalized Discounted Cumulative Gain for ranking antibodies by affinity
+- Precision@k for top binders (top 1%, 5%, 10%)
+- AUROC and AUPRC for binarized binding (above/below median threshold per affinity type)
+- Enrichment Factor at 1% and 5% — how much better than random at identifying top binders
+
+**Calibration & Error Analysis**:
+- Predicted vs. Actual scatter plot with density coloring
+- Residual distribution histogram per affinity type
+- Calibration curve (binned predicted vs. actual means)
+- Error vs. sequence similarity to training set (detect extrapolation failures)
+
+**Generalization Metrics**:
+- LOAFO results per held-out family (all above metrics)
+- Performance on COVID variants (true zero-shot — unseen antigen family)
+- Per-antigen-family scatter plots
+- Generalization gap (in-distribution vs. LOAFO performance delta)
+- Antibody sequence novelty analysis (performance binned by edit distance to nearest training antibody)
+
+**Experiment Tracking**: All metrics logged to **Weights & Biases (wandb)** with per-epoch curves, per-family dashboards, and final summary tables.
+
+---
+
+## Project File Structure
+
+```
+d:\temp binding affinity model\
+├── data/
+│   ├── asd_regression_ready_hla.csv
+│   ├── asd_full.csv
+│   └── suitable_datasets_report.csv
+├── src/
+│   ├── __init__.py
+│   ├── config.py              # [NEW] Hyperparameters & paths
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── dataset.py         # [NEW] PyTorch Dataset class
+│   │   ├── preprocessing.py   # [NEW] Sequence cleaning, affinity normalization
+│   │   ├── splitting.py       # [NEW] LOAFO + stratified splitting
+│   │   └── clustering.py      # [NEW] Antigen family clustering
+│   ├── model/
+│   │   ├── __init__.py
+│   │   ├── encoder.py         # [NEW] ESM-2 backbone with LoRA
+│   │   ├── cross_attention.py # [NEW] Antibody-antigen cross-attention
+│   │   ├── pooling.py         # [NEW] Attentive pooling
+│   │   ├── heads.py           # [NEW] Multi-task affinity heads
+│   │   ├── model.py           # [NEW] Full model assembly
+│   │   └── gradient_reversal.py # [NEW] Domain adversarial component
+│   ├── training/
+│   │   ├── __init__.py
+│   │   ├── trainer.py         # [NEW] Training loop with balanced sampling
+│   │   ├── losses.py          # [NEW] Multi-task loss computation
+│   │   └── metrics.py         # [NEW] Evaluation metrics
+│   └── utils/
+│       ├── __init__.py
+│       └── logging.py         # [NEW] Experiment tracking
+├── scripts/
+│   ├── preprocess.py          # [NEW] Data preprocessing pipeline
+│   ├── train.py               # [NEW] Training entry point
+│   ├── evaluate.py            # [NEW] Evaluation entry point
+│   └── predict.py             # [NEW] Inference on new sequences
+├── notebooks/
+│   └── eda.ipynb              # [NEW] Exploratory data analysis
+├── venv/
+├── requirements.txt           # [NEW]
+└── README.md                  # [NEW]
+```
+
+---
+
+## Requirements
+
+```
+torch>=2.1
+transformers>=4.35
+peft>=0.7  (for LoRA)
+pandas
+numpy
+scipy
+scikit-learn
+mmseqs2  (for antigen clustering, system install)
+wandb  (optional, for experiment tracking)
+biopython
+```
+
+> [!NOTE]
+> **GPU**: NVIDIA H100 (80GB). This comfortably fits ESM-2 650M with LoRA, batch size 32, and bf16 precision. No model size compromises needed.
+
+---
+
+## Confirmed Decisions
+
+- ✅ **Backbone**: ESM-2 650M for all sequences
+- ✅ **Affinity types**: 6 separate multi-task heads, no harmonization
+- ✅ **GPU**: H100 (80GB) — bf16, batch size 32
+- ✅ **Tracking**: Weights & Biases (wandb)
+- ✅ **Data**: Only `asd_regression_ready_hla.csv` (164K rows)
+- ✅ **Light chain bias mitigation**: Light chain masking (30% of training steps) + balanced sampling
+
+## Verification Plan
+
+### Automated Tests
+- Unit tests for data loading, splitting, and model forward pass
+- Integration test: train for 2 epochs on 1% sample, verify loss decreases
+- LOAFO cross-validation with metrics logged per fold
+
+### Manual Verification
+- Review per-antigen scatter plots (predicted vs. actual affinity)
+- Check that LOAFO performance on held-out families is non-random (Pearson > 0.3)
+- Verify gradient reversal is reducing antigen-family predictability from shared features

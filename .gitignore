@@ -1,0 +1,53 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Outputs & checkpoints
+outputs/
+*.pt
+*.pth
+*.ckpt
+
+# Data (large files)
+data/*.csv
+
+# Analysis scripts (temp)
+analyze_data.py
+analyze_bias.py
+analysis_output.txt
+bias_output.txt
+preprocess_output.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/
+
+# Logs
+*.log
+wandb/
+
+# ESM-2 model cache
+.cache/
