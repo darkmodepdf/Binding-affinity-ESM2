@@ -44,6 +44,7 @@ class Trainer:
         model: AffinityModel,
         train_loader: DataLoader,
         val_loader: DataLoader,
+        train_config: TrainConfig,
         eval_config: EvalConfig,
         model_config: ModelConfig,
         type_weights: Optional[Dict[str, float]] = None,
