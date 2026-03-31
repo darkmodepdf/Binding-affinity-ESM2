@@ -85,7 +85,7 @@ class AffinityModel(nn.Module):
             self.family_classifier = AntigenFamilyClassifier(
                 input_dim=config.pool_dim,
                 num_families=config.num_antigen_families,
-                grl_lambda=config.grl_lambda,
+                grl_lambda=0.0, # Will be ramped up to config.grl_lambda_max by trainer
             )
 
         # Count total params
