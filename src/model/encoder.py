@@ -34,8 +34,12 @@ class ESM2Encoder(nn.Module):
         self.esm_model = AutoModel.from_pretrained(
             config.esm_model_name,
             torch_dtype=torch.bfloat16,
+            use_cache=False,
         )
 
+        # Enable gradient checkpointing to save memory
+        self.esm_model.gradient_checkpointing_enable()
+        
         # Apply LoRA
         lora_config = LoraConfig(
             task_type=TaskType.FEATURE_EXTRACTION,

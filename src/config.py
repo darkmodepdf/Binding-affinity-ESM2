@@ -125,9 +125,9 @@ class TrainConfig:
     max_grad_norm: float = 1.0
 
     # Batch
-    batch_size: int = 32
-    gradient_accumulation_steps: int = 2
-    effective_batch_size: int = 64  # batch_size * grad_accum
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 16
+    effective_batch_size: int = 128  # batch_size * grad_accum
 
     # Schedule
     num_epochs: int = 30
