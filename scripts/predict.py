@@ -142,7 +142,7 @@ def main():
                 for k, v in batch.items()
             }
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 outputs = model(
                     heavy_input_ids=batch["heavy_input_ids"],
                     heavy_attention_mask=batch["heavy_attention_mask"],

@@ -101,8 +101,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--num-workers", type=int, default=None, help="Override dataloader workers")
     parser.add_argument(
-        "--no-compile", action="store_true",
-        help="Disable torch.compile (for debugging)"
+        "--compile", action="store_true",
+        help="Enable torch.compile (requires C compiler / Triton)"
     )
     parser.add_argument(
         "--smoke-test", action="store_true",
@@ -124,8 +124,8 @@ def main():
         train_config.batch_size = args.batch_size
     if args.num_workers is not None:
         data_config.num_workers = args.num_workers
-    if args.no_compile:
-        train_config.use_torch_compile = False
+    if args.compile:
+        train_config.use_torch_compile = True
 
     set_seed(train_config.seed)
 
@@ -243,5 +243,7 @@ def main():
             logger.info(f"  {metric_name:<20}: {v:.4f}")
     logger.info("=" * 60)
     logger.info(f"Detailed per-head metrics saved to {LOGS_DIR}/training_history.json")
+
+
 if __name__ == "__main__":
     main()

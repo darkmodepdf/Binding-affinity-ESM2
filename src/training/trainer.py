@@ -42,12 +42,16 @@ class CUDAPrefetcher:
     Overlaps CPU→GPU data transfer with GPU compute, eliminating
     the blocking .to(device) call from the training loop.
     On A100 with PCIe Gen4, this hides ~2-5ms of transfer latency per batch.
+
+    Falls back to simple .to(device) when CUDA is not available.
     """
 
     def __init__(self, loader: DataLoader, device: torch.device):
         self.loader = loader
         self.device = device
-        self.stream = torch.cuda.Stream()
+        self.use_cuda = device.type == "cuda"
+        if self.use_cuda:
+            self.stream = torch.cuda.Stream()
 
     def __iter__(self):
         self._loader_iter = iter(self.loader)
@@ -61,14 +65,21 @@ class CUDAPrefetcher:
             self._next_batch = None
             return
 
-        with torch.cuda.stream(self.stream):
+        if self.use_cuda:
+            with torch.cuda.stream(self.stream):
+                self._next_batch = {
+                    k: v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v
+                    for k, v in self._next_batch.items()
+                }
+        else:
             self._next_batch = {
-                k: v.to(self.device, non_blocking=True) if torch.is_tensor(v) else v
+                k: v.to(self.device) if torch.is_tensor(v) else v
                 for k, v in self._next_batch.items()
             }
 
     def __next__(self):
-        torch.cuda.current_stream().wait_stream(self.stream)
+        if self.use_cuda:
+            torch.cuda.current_stream().wait_stream(self.stream)
         batch = self._next_batch
         if batch is None:
             raise StopIteration
@@ -204,7 +215,7 @@ class Trainer:
             # batch is already on GPU via prefetcher — no .to() needed
 
             # Forward
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
                 outputs = self.model(
                     heavy_input_ids=batch["heavy_input_ids"],
                     heavy_attention_mask=batch["heavy_attention_mask"],
@@ -292,7 +303,7 @@ class Trainer:
         for batch in tqdm(prefetcher, desc=f"  Evaluating ({prefix})", total=len(loader), leave=False, bar_format="{l_bar}{bar:30}{r_bar}"):
             # batch already on GPU via prefetcher
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
                 outputs = self.model(
                     heavy_input_ids=batch["heavy_input_ids"],
                     heavy_attention_mask=batch["heavy_attention_mask"],

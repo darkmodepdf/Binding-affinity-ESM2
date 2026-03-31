@@ -108,8 +108,11 @@ class DataConfig:
     # Antigen subsequence masking probability (augmentation)
     antigen_mask_prob: float = 0.15
 
-    # Number of dataloader workers
-    num_workers: int = int(os.environ.get("NUM_WORKERS", min(8, getattr(os, "cpu_count", lambda: 4)() or 4)))
+    # Number of dataloader workers (0 on Windows to avoid fork issues)
+    num_workers: int = int(os.environ.get(
+        "NUM_WORKERS",
+        0 if os.name == "nt" else min(8, getattr(os, "cpu_count", lambda: 4)() or 4)
+    ))
 
 
 @dataclass
@@ -154,7 +157,7 @@ class TrainConfig:
     seed: int = 42
 
     # A100 optimizations
-    use_torch_compile: bool = True  # torch.compile for kernel fusion on A100
+    use_torch_compile: bool = False  # torch.compile — requires C compiler (Triton/Inductor); enable with --compile flag
 
 
 @dataclass
