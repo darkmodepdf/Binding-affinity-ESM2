@@ -384,6 +384,10 @@ class Trainer:
             "global_step": self.global_step,
         }
 
+        # ALWAYS save the latest model
+        latest_path = ckpt_dir / "latest_model.pt"
+        torch.save(state, latest_path)
+
         # Save periodic checkpoint
         path = ckpt_dir / f"checkpoint_epoch_{epoch+1}.pt"
         torch.save(state, path)
@@ -464,7 +468,12 @@ class Trainer:
             self._save_history()
 
             # ── Checkpointing ──
-            is_best = val_loss < self.best_val_loss - self.train_config.min_delta
+            # Force save on epoch via `save_checkpoint` which now maintains `latest_model.pt`
+            import math
+            is_best = False
+            if not math.isnan(val_loss):
+                is_best = val_loss < self.best_val_loss - self.train_config.min_delta
+
             if is_best:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
@@ -476,8 +485,9 @@ class Trainer:
                     f"  No improvement ({self.patience_counter}/{self.train_config.patience})"
                 )
 
-            if (epoch + 1) % self.train_config.save_every_n_epochs == 0 or is_best:
-                self.save_checkpoint(epoch, val_metrics, is_best=is_best)
+            # Note: `save_checkpoint` is naturally triggered on is_best and modulus condition
+            # but we will now trigger it unconditionally every epoch so users don't lose progress
+            self.save_checkpoint(epoch, val_metrics, is_best=is_best)
 
             # ── Early stopping ──
             if self.patience_counter >= self.train_config.patience:
