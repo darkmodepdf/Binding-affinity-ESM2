@@ -16,8 +16,7 @@ import torch.nn as nn
 
 from src.config import ModelConfig
 from src.model.encoder import ESM2Encoder
-from src.model.cross_attention import CrossAttentionStack
-from src.model.pooling import AttentivePooling
+from src.model.cross_attention import PerceiverInteractionStack
 from src.model.heads import MultiTaskHeads
 from src.model.gradient_reversal import AntigenFamilyClassifier
 
@@ -48,30 +47,23 @@ class AffinityModel(nn.Module):
         self.antibody_dropout = nn.Dropout(config.antibody_embedding_dropout)
         self.antigen_dropout = nn.Dropout(config.antigen_embedding_dropout)
 
-        # ── Cross-attention ──
-        self.cross_attention = CrossAttentionStack(
+        # ── Perceiver Interaction Bottleneck ──
+        self.cross_attention = PerceiverInteractionStack(
+            num_latents=config.num_latent_tokens,
             d_model=config.esm_hidden_dim,
-            n_heads=config.cross_attn_heads,
-            n_layers=config.cross_attn_layers,
-            dropout=config.cross_attn_dropout,
+            n_heads=config.interaction_heads,
+            n_layers=config.interaction_layers,
+            dropout=config.interaction_dropout,
         )
 
-        # ── Attentive pooling (pool both ab and ag, then combine) ──
-        self.ab_pooling = AttentivePooling(
-            input_dim=config.esm_hidden_dim,
-            output_dim=config.pool_dim,
-        )
-        self.ag_pooling = AttentivePooling(
-            input_dim=config.esm_hidden_dim,
-            output_dim=config.pool_dim,
-        )
-
-        # Combine pooled ab + ag representations
+        # ── Latent Pooling ──
+        # Since the Perceiver produces K interacting latents, we just mean-pool 
+        # them and project into the expected fixed-size head representation.
         self.interaction_proj = nn.Sequential(
-            nn.Linear(config.pool_dim * 2, config.pool_dim),
+            nn.Linear(config.esm_hidden_dim, config.pool_dim),
             nn.LayerNorm(config.pool_dim),
             nn.GELU(),
-            nn.Dropout(config.cross_attn_dropout),
+            nn.Dropout(config.interaction_dropout),
         )
 
         # ── Multi-task prediction heads ──
@@ -186,16 +178,14 @@ class AffinityModel(nn.Module):
             antigen_attention_mask,
         )
 
-        # ── Cross-attention ──
-        ab_emb, ag_emb = self.cross_attention(ab_emb, ag_emb, ab_mask, ag_mask)
+        # ── Perceiver Bottleneck Interaction ──
+        # Extracts dense bidirectional context into the K trainable latents
+        latents = self.cross_attention(ab_emb, ag_emb, ab_mask, ag_mask)  # (B, K, D)
 
-        # ── Attentive pooling ──
-        ab_pooled = self.ab_pooling(ab_emb, ab_mask)  # (B, pool_dim)
-        ag_pooled = self.ag_pooling(ag_emb, ag_mask)  # (B, pool_dim)
-
-        # ── Combine ──
-        interaction = torch.cat([ab_pooled, ag_pooled], dim=-1)  # (B, pool_dim*2)
-        interaction = self.interaction_proj(interaction)  # (B, pool_dim)
+        # ── Pool and Project ──
+        # Latents already fully represent the paratope/epitope union
+        latent_pooled = latents.mean(dim=1)  # (B, D)
+        interaction = self.interaction_proj(latent_pooled)  # (B, pool_dim)
 
         # ── Predict ──
         predictions = self.heads(interaction, affinity_type_idx)

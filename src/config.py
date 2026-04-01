@@ -43,9 +43,9 @@ LOG_TRANSFORM_TYPES = {"kd", "ic_50"}
 class ModelConfig:
     """ESM-2 backbone and architecture hyperparameters."""
 
-    # Backbone
-    esm_model_name: str = "facebook/esm2_t33_650M_UR50D"
-    esm_hidden_dim: int = 1280
+    # Backbone (Option D: Fast 150M)
+    esm_model_name: str = "facebook/esm2_t30_150M_UR50D"
+    esm_hidden_dim: int = 640
     freeze_backbone: bool = False  # we use LoRA instead
 
     # LoRA
@@ -56,10 +56,11 @@ class ModelConfig:
         default_factory=lambda: ["query", "key", "value"]
     )
 
-    # Cross-attention
-    cross_attn_layers: int = 4
-    cross_attn_heads: int = 16
-    cross_attn_dropout: float = 0.1
+    # Perceiver Latent Interaction
+    num_latent_tokens: int = 64
+    interaction_layers: int = 4
+    interaction_heads: int = 10  # 640 / 10 = 64 dim per head
+    interaction_dropout: float = 0.1
 
     # Pooling
     pool_dim: int = 512
