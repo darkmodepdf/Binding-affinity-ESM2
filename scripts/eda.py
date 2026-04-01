@@ -6,6 +6,7 @@ import subprocess
 import os
 import tempfile
 import logging
+from tqdm import tqdm
 from typing import List, Dict, Optional
 import warnings
 
@@ -128,7 +129,7 @@ class AntibodyEDA:
             
             # Write Fasta
             with open(fasta_path, 'w') as f:
-                for seq_id, seq in zip(ids, sequences):
+                for seq_id, seq in tqdm(zip(ids, sequences), total=len(sequences), desc="Writing Fasta for CD-HIT"):
                     f.write(f">{seq_id}\n{seq}\n")
                     
             # Run CD-HIT
@@ -209,7 +210,7 @@ class AntibodyEDA:
         if HAS_ANARCI:    
             logger.info("Extracting CDR3s using ANARCI...")
             # For simplicity, passing one by one. Ideally batch this.
-            for idx, seq in zip(df[id_col], df[vh_col]):
+            for idx, seq in tqdm(zip(df[id_col], df[vh_col]), total=len(df), desc="Extracting CDR3 (ANARCI)"):
                 if pd.isna(seq):
                     cdr3_list.append(None)
                     continue
@@ -254,7 +255,8 @@ class AntibodyEDA:
             sample_cdr3s = valid_cdr3s.sample(min(5000, len(valid_cdr3s))).tolist()
             distances = []
             # Calculate distance to nearest neighbor for a random subset to estimate density
-            for i in range(min(500, len(sample_cdr3s))):
+            sample_size = min(500, len(sample_cdr3s))
+            for i in tqdm(range(sample_size), desc="Calculating Levenshtein dists"):
                 min_dist = float('inf')
                 for j in range(len(sample_cdr3s)):
                     if i != j:
@@ -332,6 +334,12 @@ if __name__ == "__main__":
         
     df = pd.read_csv(args.csv)
     
+    # Preprocess missing IDs
+    if args.id not in df.columns:
+        logger.warning(f"ID column '{args.id}' not found. Auto-generating unique IDs ('dataset_index').")
+        df['dataset_index'] = df.index
+        args.id = 'dataset_index'
+        
     eda = AntibodyEDA(output_dir=args.outdir)
     
     # 1. Target distribution
