@@ -109,11 +109,10 @@ class DataConfig:
     # Antigen subsequence masking probability (augmentation)
     antigen_mask_prob: float = 0.15
 
-    # Number of dataloader workers (0 on Windows to avoid fork issues)
-    num_workers: int = int(os.environ.get(
-        "NUM_WORKERS",
-        0 if os.name == "nt" else min(8, getattr(os, "cpu_count", lambda: 4)() or 4)
-    ))
+    # Number of dataloader workers
+    # Set to 0 because the entire dataset is pre-tokenized in RAM.
+    # PyTorch IPC multiprocessing queues actually SLOW down in-memory fetches.
+    num_workers: int = 0
 
 
 @dataclass
@@ -130,8 +129,8 @@ class TrainConfig:
     max_grad_norm: float = 1.0
 
     # Batch
-    batch_size: int = 8
-    gradient_accumulation_steps: int = 16
+    batch_size: int = 32
+    gradient_accumulation_steps: int = 4
     effective_batch_size: int = 128  # batch_size * grad_accum
 
     # Schedule

@@ -37,8 +37,8 @@ class ESM2Encoder(nn.Module):
             use_cache=False,
         )
 
-        # Enable gradient checkpointing to save memory
-        self.esm_model.gradient_checkpointing_enable()
+        # Gradient checkpointing disabled for speed. (150M model easily fits in VRAM)
+        # self.esm_model.gradient_checkpointing_enable()
         
         # Apply LoRA
         lora_config = LoraConfig(
